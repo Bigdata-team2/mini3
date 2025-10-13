@@ -1,0 +1,77 @@
+<YOLO(You Only Look Once)>
+- 객체 탐지 모델로 "욜로"라고 칭합니다.
+- 한 개의 계층을 이용해서 객체(사물)를 탐지(인지)하는 사전 훈련 모델임
+- 용어 정의
+* 객체(사물)의 영역 : Bounding Box 라고 칭함
+* 객체(사물)의 이름 : Class 또는 label 이라고 칭함
+* 정확도 : score
+
+<객체(사물) 탐지(Object Detection) 대상(매체)>
+- 이미지를 이용 -> 이미지 내 객체(사물) 탐지 가능
+- 동영상을 이용 -> 동영상 내에 프레임을 이용해서 이미지화 해서 객체(사물) 탐지 가능
+
+<YOLO 버전>
+- YOLOv1 ~ VOLOvn : YOLO 버전은 현재 계속 업데이트 되고 있음, YOLO는 오픈소스 기반임
+- v1~v5 : 전통성(프레임워크)에 따라서 업그레이드가 되어 있는 모델
+- v6~vn : 전통성에서 벗어나 개인들에 의해서 만들어진 유명한 모델
+- 우리는 전통모델의 마지막인 v5를 쓸것임! 현업에서는 v5, v8 많이 씀.
+
+<YOLOv5 환경설정 방법>
+- 1. YOLO만의 가상환경 만들기
+-> 가상환경 이름 생성
+    > conda create -n busan_yolov5_cpu python=3.10
+    > conda activate busan_yolov5_cpu
+
+-> 커널 생성
+    > python -m pip install --upgrade pip
+    > pip install jupyter notebook
+    > python -m ipykernel install --user --name busan_yolov5_cpu --display-name yolov5_cpu_kernel
+
+-> YOLO v5에서 제공하는 라이브러리만 설치 (버전 충돌을 피하기 위해)
+==> YOLO 가상환경에 머신러닝 및 딥러닝 등 다른 라이브러리 설치는
+    YOLO 라이브러리 설치 후 진행해야 버전 충돌을 최소화 할 수 있음
+    > 다운받은 yolov5-master 폴더로 이동 (ex. cd 머시기)
+    > pip install -U -r requirements.txt
+
+    # (GPU 쓸경우 아래 추가 설치 필요)
+        > 그래픽 드라이브, CUDA, cuDNN
+
+
+- 2. YOLOv5 프레임워크 다운로드
+-> 다운로드 : https://github.com/ultralytics/YOLOv5
+-> 방법 : 접속후 상단 오른쪽 초록색 [Code] > [DownloadZip] > 압축풀기
+
+* 훈련 시 s : 처음 시도 -> l : 모델이 커졌을 때 -> x : 최종 
+ 위 방식으로 .yaml 파일 버전을 기록함 (ex.yolov5s.yaml)
+
+
+ <객체 탐지하기 방법 및 명령어>
+
+ [1. 이미지를 이용한 객체 탐지]
+    - 프롬프트에서 아래 명령으로 실행
+      > python ./detect.py --weights ./models/yolov5s.pt --img 640 --conf 0.5 --source ./data/images/bus.jpg
+        
+        # detect.py : 추론(예측/실제 객체 탐지) 진행하는 파일
+        # --weights : 모델 가중치 파일명을 오른쪽에 지정
+                    : 이 가중치 모델로 객체 탐지를 수행함
+                    : 최초에는 존재하지 않으며, 아래 명령을 실행하면 자동 다운로드 됨
+                    : 개별 훈련이 진행된 경우에는 개별 가중치 파일(*.pt)을 사용하면 됨
+        # --img     : 입력 이미지의 크기를 통일시킴 (640*640 사이즈를 의미함)
+                    : 사용되는 사이즈 -> 320, 416, 640 (416 주로 사용됨)
+        # --conf    : 정확도(Yolo에서는 임계값이라고 칭합니다.)
+                    : 객체 인식율이 0.5(50%) 이상의 정확도를 가지는 경우에만 객체 탐지 시킴
+                    : 정밀하게 탐지할 땐 0.9, 1.0도 쓰지만, 거의 탐지되지 않음
+        # --source  : 객체 탐지에 사용할 예측 데이터(이미지 파일, 동영상 파일, 카메라)
+
+ [2. 카메라를 이용한 객체 탐지]
+    - 카메라를 이용하는 경우에는 --source 속성 뒤에 숫자를 이용함
+      (카메라가 1개인 경우 0, 2개 이상인 경우에는 사용할 카메라 번호 사용)
+    - 종료 : Ctrl + C
+      > python ./detect.py --weights ./models/yolov5s.pt --img 640 --conf 0.5 --source 0
+
+
+ [3. 동영상 파일을 이용한 객체 탐지]
+  - 동영상 파일(mp4) 준비 
+    > python ./detect.py --weights ./models/yolov5s.pt --img 640 --conf 0.5 --source ./data/mp4/강아쥐.mp4
+
+    *** GPU 환경에서 실행 시에는 위 명령 맨 뒤에 --device 0 을 추가하면 됨

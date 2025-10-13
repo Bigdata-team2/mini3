@@ -1,0 +1,13 @@
+# my_data.yaml
+
+# 훈련, 검증, 테스트 이미지 경로 지정 (루트 경로: yolov5/를 기준으로 '..' 사용)
+train: ../datasets/my_custom_data/images/train
+val: ../datasets/my_custom_data/images/val
+test: ../datasets/my_custom_data/images/test # 테스트 실행 명령어를 위해 필요
+
+# 클래스(객체) 수
+nc: 10
+
+# 클래스 이름 (순서가 라벨 파일의 인덱스(0, 1, 2)와 정확히 일치해야 함)
+names:
+  ["pork", "cuc", "rad", "pota", "oni", "cab", "cab2", "lee", "tofu", "egg"]
