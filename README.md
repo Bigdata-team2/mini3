@@ -1,1 +1,1 @@
-# Mini3 Project - main branch (for integration only)
+# [Mini3 Project] 냉장고털이범
