@@ -1,262 +1,236 @@
-# 필요한 라이브러리 임포트
-from fastapi import FastAPI, Request, HTTPException  # FastAPI 웹 프레임워크
-from fastapi.middleware.cors import CORSMiddleware  # CORS 미들웨어
-from pydantic import BaseModel  # 데이터 검증을 위한 Pydantic
-import chromadb  # 벡터 데이터베이스
-from chromadb.config import Settings  # ChromaDB 설정
-from sentence_transformers import SentenceTransformer  # 텍스트 임베딩 모델
-import pandas as pd  # 데이터 처리
-import os
-from typing import List, Dict, Any  # 타입 힌팅
+# main.py
+# ------------------------------------------------------------
+# FastAPI + YOLO(best.pt) 추론 + (옵션) Chroma 레시피 검색
+# - 비전 파트: ultralytics 만 사용 (YOLOv5 레포 import X)
+# - 모델파일: ./best.pt (동일 경로)
+# - 엔드포인트:
+#   1) POST /predict              : 이미지 → 재료 인식 결과(JSON)
+#   2) POST /recipes/search       : 재료 리스트 → 레시피 질의
+#   3) POST /predict-and-recommend: 이미지 → 재료 인식 → 레시피 추천
+# ------------------------------------------------------------
 
-# FastAPI 애플리케이션 인스턴스 생성
-app = FastAPI(title="Recipe Search API", version="1.0.0")
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Any
+from PIL import Image
+import io
+from python_multipart import multipart  # Add python-multipart import
 
-# CORS 미들웨어 설정
-# Flutter 앱에서 API 호출을 허용하기 위한 설정
+# ✅ 비전: YOLO(best.pt만 사용) - ultralytics
+from ultralytics import YOLO
+
+# ✅ 레시피 검색: ChromaDB (벡터 임베딩은 sentence-transformers)
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+
+# -----------------------------
+# 0) 앱 & CORS
+# -----------------------------
+app = FastAPI(title="Mini3 - Ingredient Detector & Recipe Search", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 모든 도메인 허용 (개발용)
+    allow_origins=["*"],   # 개발 단계 전부 허용
     allow_credentials=True,
-    allow_methods=["*"],  # 모든 HTTP 메서드 허용
-    allow_headers=["*"],  # 모든 헤더 허용
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ChromaDB 클라이언트 설정
-# 로컬 파일 시스템에 데이터를 영구 저장
-client = chromadb.PersistentClient(
-    path="./chroma_db",  # 데이터 저장 경로
-    settings=Settings(
-        anonymized_telemetry=False,  # 텔레메트리 비활성화
-        allow_reset=True  # 컬렉션 리셋 허용
+# -----------------------------
+# 1) YOLO 모델 로드 (pt 외 의존 X)
+# -----------------------------
+MODEL_PATH = "models/best.pt"  # 같은 폴더에 둔다
+try:
+    yolo_model = YOLO(MODEL_PATH)  # ultralytics가 내부적으로 가중치만 사용
+    CLASS_NAMES = yolo_model.names  # id→label 매핑
+    print("✅ YOLO 모델 로드 완료:", MODEL_PATH)
+    print("📋 클래스 목록:", CLASS_NAMES)
+except Exception as e:
+    print("❌ YOLO 모델 로드 실패:", e)
+    yolo_model = None
+    CLASS_NAMES = {}
+
+# -----------------------------
+# 2) ChromaDB 초기화 (옵션)
+#    - persist_directory: 로컬에 영속 저장(개발용)
+#    - 임베딩: all-MiniLM-L6-v2
+#    - collection 이름: recipes
+#    - 사전 구축은 별도 스크립트에서 upsert 해두기!
+# -----------------------------
+EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL_NAME)
+
+chroma_client = chromadb.Client(
+    Settings(
+        anonymized_telemetry=False,
+        persist_directory="./chroma_data"  # 폴더 자동 생성
     )
 )
 
-# 문장 임베딩을 위한 모델 로드
-# all-MiniLM-L6-v2: 다국어 지원, 빠른 속도, 적절한 성능의 경량 모델
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# 존재하면 가져오고, 없으면 새로 만든다
+try:
+    recipes_col = chroma_client.get_or_create_collection(
+        name="recipes",
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"}
+    )
+    print("✅ Chroma 컬렉션 준비 완료: recipes")
+except Exception as e:
+    print("❌ Chroma 컬렉션 생성 실패:", e)
+    recipes_col = None
 
-# ChromaDB 컬렉션 생성/로드
-# 코사인 유사도를 사용하는 HNSW 인덱스 설정
-recipes_info = client.get_or_create_collection(
-    "recipes_info",  # 레시피 기본 정보 컬렉션
-    metadata={"hnsw:space": "cosine"}
-)
-recipes_steps = client.get_or_create_collection(
-    "recipes_steps",  # 레시피 조리 단계 컬렉션
-    metadata={"hnsw:space": "cosine"}
-)
-user_allergy = client.get_or_create_collection(
-    "user_allergy",  # 사용자 알러지 정보 컬렉션
-    metadata={"hnsw:space": "cosine"}
-)
+# -----------------------------
+# 3) 스키마
+# -----------------------------
+class RecipeSearchIn(BaseModel):
+    ingredients: List[str]
+    top_k: int = 5
 
-# Pydantic 모델 정의
-# API 요청/응답의 데이터 구조와 유효성 검사를 위한 모델
-class RecipeInfo(BaseModel):
-    recipe_id: str  # 레시피 고유 ID
-    요리명: str  # 레시피 이름
-    요리별재료: str  # 재료 목록
-    조리시간: str = ""  # 예상 조리 시간
-    난이도: str = ""  # 레시피 난이도
-    카테고리: str = ""  # 음식 카테고리
+# -----------------------------
+# 4) 유틸: YOLO 추론 → 결과 정리
+# -----------------------------
+def run_yolo_inference(image_bytes: bytes, conf_threshold: float = 0.25) -> Dict[str, Any]:
+    if yolo_model is None:
+        raise RuntimeError("YOLO model is not loaded.")
 
-class RecipeStep(BaseModel):
-    recipe_id: str  # 레시피 ID
-    recipe_num: int  # 조리 단계 번호
-    recipe_text: str  # 조리 방법 설명
-    recipe_img_url: str = ""  # 조리 단계 이미지 URL
+    # PIL 로 로드 (RGB)
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-class UserAllergy(BaseModel):
-    이메일: str  # 사용자 이메일
-    알러지정보: str  # 알러지 정보 (쉼표로 구분)
+    # ultralytics 예측 (single-image)
+    # 반환: list[ultralytics.engine.results.Results]
+    results = yolo_model.predict(source=img, conf=conf_threshold, verbose=False)
+    result = results[0]
 
-class BuildChromaRequest(BaseModel):
-    recipes_info: List[RecipeInfo]  # 레시피 기본 정보 목록
-    recipes_steps: List[RecipeStep]  # 레시피 조리 단계 목록
-    user_allergy: List[UserAllergy]  # 사용자 알러지 정보 목록
+    detections = []
+    unique_ingredients = []
 
-class SearchRequest(BaseModel):
-    query: str  # 검색 쿼리
-    top_k: int = 5  # 반환할 결과 수
-    collection_type: str = "recipes_info"  # 검색할 컬렉션 타입
+    # 박스, cls, conf 추출
+    if result.boxes is not None and len(result.boxes) > 0:
+        for box in result.boxes:
+            cls_id = int(box.cls.item())
+            conf = float(box.conf.item())
+            label = CLASS_NAMES.get(cls_id, str(cls_id))
+            xyxy = [float(v) for v in box.xyxy[0].tolist()]  # [x1,y1,x2,y2]
 
-# 루트 엔드포인트: API 상태 확인
-@app.get("/")
-async def root():
-    return {"message": "Recipe Search API", "status": "running"}
+            detections.append({
+                "label": label,
+                "confidence": round(conf, 4),
+                "box_xyxy": xyxy
+            })
+            unique_ingredients.append(label)
 
-# 헬스체크 엔드포인트: 각 컬렉션의 데이터 수 반환
-@app.get("/health")
-async def health_check():
+    # 중복 제거 순서 유지
+    seen = set()
+    unique_ingredients = [x for x in unique_ingredients if not (x in seen or seen.add(x))]
+
     return {
-        "status": "healthy",
-        "collections": {
-            "recipes_info": recipes_info.count(),
-            "recipes_steps": recipes_steps.count(),
-            "user_allergy": user_allergy.count()
-        }
+        "ingredients": unique_ingredients,
+        "detections": detections,
+        "count": len(detections)
     }
 
-# ChromaDB 데이터 구축 엔드포인트
-@app.post("/build_chroma/")
-async def build_chroma(request: BuildChromaRequest):
+# -----------------------------
+# 5) 엔드포인트: 이미지 → 재료 인식
+#     Flutter에서 멀티파트로 'image' 키로 업로드하면 됨
+# -----------------------------
+@app.post("/predict")
+async def predict(image: UploadFile = File(...)):
+    if image.content_type is None or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="이미지 파일을 업로드하세요.")
+
     try:
-        # 1. 레시피 기본 정보 저장
-        if request.recipes_info:
-            # DataFrame 생성 및 텍스트 결합
-            df_info = pd.DataFrame([r.dict() for r in request.recipes_info])
-            info_texts = (df_info["요리명"] + " " + df_info["요리별재료"]).tolist()
-            # 텍스트 임베딩 생성
-            info_embeddings = model.encode(info_texts, normalize_embeddings=True).tolist()
-            
-            # ChromaDB에 데이터 저장
-            recipes_info.upsert(
-                ids=df_info["recipe_id"].tolist(),
-                documents=info_texts,
-                metadatas=df_info.to_dict("records"),
-                embeddings=info_embeddings
-            )
-
-        # 2. 레시피 조리 단계 저장
-        if request.recipes_steps:
-            df_steps = pd.DataFrame([r.dict() for r in request.recipes_steps])
-            steps_text = df_steps["recipe_text"].tolist()
-            step_embeddings = model.encode(steps_text, normalize_embeddings=True).tolist()
-            
-            recipes_steps.upsert(
-                ids=[f"{rid}_{num}" for rid, num in zip(df_steps["recipe_id"], df_steps["recipe_num"])],
-                documents=steps_text,
-                metadatas=df_steps.to_dict("records"),
-                embeddings=step_embeddings
-            )
-
-        # 3. 사용자 알러지 정보 저장
-        if request.user_allergy:
-            df_user = pd.DataFrame([u.dict() for u in request.user_allergy])
-            allergy_texts = df_user["알러지정보"].tolist()
-            allergy_embeddings = model.encode(allergy_texts, normalize_embeddings=True).tolist()
-            
-            user_allergy.upsert(
-                ids=df_user["이메일"].tolist(),
-                documents=allergy_texts,
-                metadatas=df_user.to_dict("records"),
-                embeddings=allergy_embeddings
-            )
-
-        # 성공 응답 반환
+        image_bytes = await image.read()
+        out = run_yolo_inference(image_bytes)
+        # Flask 호환 간단 형태(ingredients만)도 포함해 반환
         return {
-            "status": "success",
-            "message": "ChromaDB 데이터 구축 완료",
-            "counts": {
-                "recipes_info": recipes_info.count(),
-                "recipes_steps": recipes_steps.count(),
-                "user_allergy": user_allergy.count()
-            }
+            "ingredients": out["ingredients"],
+            "detections": out["detections"],  # UI에서 박스/확률 쓰고 싶으면 사용
+            "count": out["count"]
         }
-    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"데이터 구축 실패: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"추론 중 오류: {e}")
 
-# 검색 엔드포인트
-@app.post("/search/")
-async def search(request: SearchRequest):
+# -----------------------------
+# 6) 엔드포인트: 재료 리스트 → 레시피 검색 (Chroma)
+#     - 사전 upsert된 recipes 컬렉션에 질의
+#     - metadata 예시: { "recipe_id": "...", "title": "...", "ingredients": "...", ... }
+# -----------------------------
+@app.post("/recipes/search")
+def search_recipes(body: RecipeSearchIn):
+    if recipes_col is None:
+        raise HTTPException(status_code=500, detail="Chroma 컬렉션이 준비되지 않았습니다.")
+    if not body.ingredients:
+        return {"results": []}
+
+    # 질의 텍스트 단순 결합 (예: "egg, tomato, onion")
+    query_text = ", ".join(body.ingredients)
+
     try:
-        # 검색할 컬렉션 선택
-        collection_map = {
-            "recipes_info": recipes_info,
-            "recipes_steps": recipes_steps,
-            "user_allergy": user_allergy
-        }
-        
-        collection = collection_map.get(request.collection_type)
-        if not collection:
-            raise HTTPException(status_code=400, detail="잘못된 컬렉션 타입")
-
-        # 검색 쿼리를 임베딩 벡터로 변환
-        query_embedding = model.encode([request.query], normalize_embeddings=True).tolist()
-        
-        # 벡터 유사도 검색 실행
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=request.top_k,
+        q = recipes_col.query(
+            query_texts=[query_text],
+            n_results=body.top_k,
             include=["metadatas", "distances", "documents", "ids"]
         )
-        
-        # 검색 결과 포맷팅
+        # Chroma 포맷 → 간단 리스트로 변환
         hits = []
-        if results and results.get("ids"):
-            for i in range(len(results["ids"][0])):
-                hits.append({
-                    "id": results["ids"][0][i],
-                    "document": results["documents"][0][i],
-                    "metadata": results["metadatas"][0][i],
-                    "distance": float(results["distances"][0][i]),
-                    "similarity": 1 - float(results["distances"][0][i])  # 코사인 거리를 유사도 점수로 변환
-                })
-        
-        return {
-            "query": request.query,
-            "collection": request.collection_type,
-            "hits": hits,
-            "total_hits": len(hits)
-        }
-    
+        for i in range(len(q["ids"][0])):
+            hits.append({
+                "id": q["ids"][0][i],
+                "distance": float(q["distances"][0][i]) if q.get("distances") else None,
+                "metadata": q["metadatas"][0][i],
+                "document": q["documents"][0][i] if q.get("documents") else None
+            })
+        return {"query": query_text, "results": hits}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"검색 실패: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"레시피 검색 오류: {e}")
 
-# 알러지 필터링이 적용된 검색 엔드포인트
-@app.post("/search_with_allergy_filter/")
-async def search_with_allergy_filter(request: SearchRequest, user_email: str):
-    """알러지 정보를 고려한 레시피 검색"""
+# -----------------------------
+# 7) 엔드포인트: 이미지 → 재료 인식 → 레시피 추천(원샷)
+# -----------------------------
+@app.post("/predict-and-recommend")
+async def predict_and_recommend(image: UploadFile = File(...), top_k: int = 5):
+    if image.content_type is None or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="이미지 파일을 업로드하세요.")
+    if recipes_col is None:
+        raise HTTPException(status_code=500, detail="Chroma 컬렉션이 준비되지 않았습니다.")
+
     try:
-        # 1. 기본 레시피 검색 (필터링을 위해 요청된 것보다 2배 많은 결과 조회)
-        recipe_results = recipes_info.query(
-            query_embeddings=model.encode([request.query], normalize_embeddings=True).tolist(),
-            n_results=request.top_k * 2,
+        image_bytes = await image.read()
+        det = run_yolo_inference(image_bytes)
+        ingredients = det["ingredients"]
+
+        if not ingredients:
+            return {
+                "ingredients": [],
+                "recommendations": []
+            }
+
+        # Chroma 질의
+        query_text = ", ".join(ingredients)
+        q = recipes_col.query(
+            query_texts=[query_text],
+            n_results=top_k,
             include=["metadatas", "distances", "documents", "ids"]
         )
-        
-        # 2. 사용자의 알러지 정보 조회
-        user_allergy_results = user_allergy.get(ids=[user_email])
-        user_allergies = []
-        if user_allergy_results and user_allergy_results.get("documents"):
-            user_allergies = user_allergy_results["documents"][0].split(",")
-        
-        # 3. 알러지 성분 필터링
-        filtered_hits = []
-        if recipe_results and recipe_results.get("ids"):
-            for i in range(len(recipe_results["ids"][0])):
-                recipe_ingredients = recipe_results["metadatas"][0][i].get("요리별재료", "")
-                
-                # 알러지 성분이 포함된 레시피 제외
-                has_allergy = any(allergy.strip() in recipe_ingredients for allergy in user_allergies)
-                
-                if not has_allergy:
-                    filtered_hits.append({
-                        "id": recipe_results["ids"][0][i],
-                        "document": recipe_results["documents"][0][i],
-                        "metadata": recipe_results["metadatas"][0][i],
-                        "distance": float(recipe_results["distances"][0][i]),
-                        "similarity": 1 - float(recipe_results["distances"][0][i])
-                    })
-                    
-                    # 요청된 수만큼 결과를 찾으면 중단
-                    if len(filtered_hits) >= request.top_k:
-                        break
-        
-        return {
-            "query": request.query,
-            "user_email": user_email,
-            "user_allergies": user_allergies,
-            "hits": filtered_hits,
-            "total_hits": len(filtered_hits)
-        }
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"알러지 필터 검색 실패: {str(e)}")
+        hits = []
+        for i in range(len(q["ids"][0])):
+            hits.append({
+                "id": q["ids"][0][i],
+                "distance": float(q["distances"][0][i]) if q.get("distances") else None,
+                "metadata": q["metadatas"][0][i],
+                "document": q["documents"][0][i] if q.get("documents") else None
+            })
 
-# 직접 실행 시 uvicorn 서버 구동
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8081)
+        return {
+            "ingredients": ingredients,
+            "detections": det["detections"],
+            "recommendations": hits
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"처리 중 오류: {e}")
+
+# -----------------------------
+# 8) 로컬 실행
+# -----------------------------
+# uvicorn main:app --host 0.0.0.0 --port 8000 --reload
