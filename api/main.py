@@ -1,6 +1,8 @@
 # 필요한 라이브러리 임포트
 import torch
-import yolov5
+import sys
+import cv2
+import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,29 +10,17 @@ from typing import List, Dict, Any
 from PIL import Image
 import io
 import warnings
-import pathlib
 
-# PyTorch 2.6+ 호환성 설정
-torch.serialization.add_safe_globals(['models.yolo.DetectionModel'])
-warnings.filterwarnings("ignore", category=UserWarning, module="torch.serialization")
+# YOLOv7 경로 추가
+sys.path.append('/Users/shindongeun/bigdata_lacture/team_project/mini3/yolov7')
 
-# pathlib 호환성 패치 (WindowsPath -> PosixPath)
-# Windows 경로를 POSIX 경로로 변환하는 클래스
-class PatchedPath(pathlib.PurePath):
-    def __new__(cls, *args, **kwargs):
-        if cls is pathlib.WindowsPath:
-            return pathlib.PosixPath(*args, **kwargs)
-        return super().__new__(cls, *args, **kwargs)
+from models.experimental import attempt_load
+from utils.general import non_max_suppression, scale_coords
+from utils.torch_utils import select_device
+from utils.datasets import letterbox
 
-# pathlib 모듈의 WindowsPath를 PatchedPath로 대체
-pathlib.WindowsPath = PatchedPath
-
-# torch.load 함수를 패치하여 weights_only=False 옵션 추가
-original_torch_load = torch.load
-def patched_torch_load(*args, **kwargs):
-    kwargs['weights_only'] = False
-    return original_torch_load(*args, **kwargs)
-torch.load = patched_torch_load
+# 경고 무시
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # FastAPI 앱 생성 및 CORS 미들웨어 설정
 app = FastAPI(title="Mini3 - Ingredient Detector", version="1.0.0")
@@ -42,48 +32,77 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# YOLOv5 모델 파일 경로 설정
-MODEL_PATH = "../models/best.pt"
+# YOLOv7 모델 파일 경로 설정
+MODEL_PATH = "/Users/shindongeun/bigdata_lacture/team_project/mini3/models/yolov7_custom2/weights/best.pt"
+IMG_SIZE = 640
+IOU_THRESHOLD = 0.45
 
-# YOLOv5 모델 로드 및 설정
+# YOLOv7 모델 로드 및 설정
 try:
-    yolo_model = yolov5.load(MODEL_PATH)
-    yolo_model.conf = 0.25  # 신뢰도 임계값 설정
-    yolo_model.iou = 0.45   # IoU 임계값 설정
+    device = select_device('')  # cuda 또는 cpu 자동 선택
+    yolo_model = attempt_load(MODEL_PATH, map_location=device)
+    yolo_model.eval()
     CLASS_NAMES = yolo_model.names
-    print("✅ YOLOv5 모델 로드 완료:", MODEL_PATH)
+    
+    print("✅ YOLOv7 모델 로드 완료:", MODEL_PATH)
     print("📋 클래스 목록:", CLASS_NAMES)
+    print(f"🖥️  디바이스: {device}")
 except Exception as e:
     print("❌ YOLO 모델 로드 실패:", e)
     raise RuntimeError(f"YOLO 모델을 로드할 수 없습니다: {e}")
 
+
 # YOLO 모델을 사용하여 이미지에서 객체 감지를 수행하는 함수
 def run_yolo_inference(image_bytes: bytes, conf_threshold: float = 0.25) -> Dict[str, Any]:
-    # 바이트 데이터를 PIL 이미지로 변환
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    # YOLO 모델로 추론 수행
-    results = yolo_model(img, size=640)
+    """
+    YOLOv7 모델로 이미지에서 재료 감지
+    """
+    # PIL 이미지로 변환
+    img_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img0 = np.array(img_pil)  # 원본 이미지 (RGB)
     
+    # 전처리: letterbox로 리사이즈 + 패딩
+    img = letterbox(img0, IMG_SIZE, stride=32, auto=True)[0]
+    
+    # RGB to BGR, HWC to CHW
+    img = img[:, :, ::-1].transpose(2, 0, 1)
+    img = np.ascontiguousarray(img)
+    
+    # Tensor 변환 및 정규화
+    img = torch.from_numpy(img).to(device)
+    img = img.float() / 255.0
+    
+    if img.ndimension() == 3:
+        img = img.unsqueeze(0)
+    
+    # 추론 수행
+    with torch.no_grad():
+        pred = yolo_model(img, augment=False)[0]
+    
+    # NMS (Non-Maximum Suppression) 적용
+    pred = non_max_suppression(pred, conf_threshold, IOU_THRESHOLD, classes=None, agnostic=False)
+    
+    # 결과 처리
     detections = []
     unique_ingredients = []
     
-    # 예측 결과 처리
-    predictions = results.pred[0]
-    if len(predictions) > 0:
-        for pred in predictions:
-            x1, y1, x2, y2, conf, cls = pred.cpu().numpy()
-            if conf >= conf_threshold:
+    for det in pred:  # 배치의 각 이미지
+        if len(det):
+            # 좌표를 원본 이미지 크기로 스케일링
+            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], img0.shape).round()
+            
+            for *xyxy, conf, cls in det:
                 cls_id = int(cls)
-                label = CLASS_NAMES.get(cls_id, str(cls_id))
+                label = CLASS_NAMES[cls_id]
                 
                 # 감지된 객체 정보 저장
                 detections.append({
                     "label": label,
                     "confidence": round(float(conf), 4),
-                    "box_xyxy": [float(x1), float(y1), float(x2), float(y2)]
+                    "box_xyxy": [float(x) for x in xyxy]
                 })
                 unique_ingredients.append(label)
-
+    
     # 중복 제거된 재료 목록 생성
     unique_ingredients = list(dict.fromkeys(unique_ingredients))
     
@@ -114,7 +133,10 @@ async def health_check():
     return {
         "status": "healthy",
         "model_loaded": True,
-        "class_count": len(CLASS_NAMES)
+        "model_version": "YOLOv7",
+        "device": str(device), 
+        "class_count": len(CLASS_NAMES),
+        "classes": CLASS_NAMES 
     }
 
 # 직접 실행 시 uvicorn 서버 구동
