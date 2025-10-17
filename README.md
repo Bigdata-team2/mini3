@@ -53,7 +53,7 @@
 ## 🧭 모델/환경 설정(요약)
 
 - 기본 입력 크기: `640`
-- 신뢰도 임계값: `0.25`
+- 신뢰도 임계값: `0.5`
 - IoU 임계값: `0.45`
 - FP16: GPU 사용 시 자동 활성화
 - 클래스 매핑(영→한, 일부 예):
@@ -79,8 +79,8 @@
     - Content-Type: `multipart/form-data`
     - Body:
         - `image`: (필수) 이미지 파일(JPEG/PNG)
-        - `img_size`: (선택) 입력 크기, 기본 `640`
-        - `conf_threshold`: (선택) 신뢰도 임계값, 기본 `0.25`
+        - `img_size`: 입력 크기 : `640`
+        - `conf_threshold`: 신뢰도 임계값 : `0.5`
 - **응답(200 OK)**
     
     ```json
@@ -115,7 +115,7 @@
 
 ---
 
-### 2) `POST /predict-and-recommend` — 재료 감지 + 레시피 추천(스텁)
+### 2) `POST /predict-and-recommend` — 재료 감지 + 레시피 추천 (사용안함)
 
 - **설명**: 감지 후 추천 로직(추후 구현)까지 한 번에 호출
 - **요청**
@@ -131,7 +131,6 @@
       "recommendations": [],   // TODO: 추후 구현
       "classes": [ "... 클래스 목록 ..." ]
     }
-    
     ```
     
 
@@ -150,7 +149,6 @@
       "class_count": 11,
       "classes": ["cab","cab2","car","cuc","egg","gar","lee","oni","pork","pota","rad"]
     }
-    
     ```
     
 
@@ -162,14 +160,12 @@
     
     ```json
     { "detail": "이미지 파일을 업로드하세요." }
-    
     ```
     
 - 내부 처리 오류
     
     ```json
     { "detail": "추론 중 오류: <메시지>" }
-    
     ```
     
 
@@ -208,8 +204,180 @@ HTTP 상태코드: `400`(요청 오류), `500`(서버 오류)
 
 ---
 
-**버전**: 1.0 (2025-10-16)
+## +) Flutter 에서 호출 방법
 
-**팀**: Mini3
-
-**문의**: sde0110@naver.com
+- Flutter(dart) 파일에서 API 호출하는 코드
+    - image_service.dart
+        
+        ```dart
+        import 'dart:convert';
+        import 'dart:io';
+        import 'package:http/http.dart' as http;
+        import 'package:http_parser/http_parser.dart';
+        
+        //------------------------------------------------------------------------------
+        // FastAPI 통신 서비스
+        //------------------------------------------------------------------------------
+        class ImageService {
+          // API 엔드포인트 
+          final String fastApiPredictUrl = "http://172.16.10.89:8081/predict";
+          final String fastApiPredictAndRecommendUrl = 
+              "http://172.16.10.89:8081/predict-and-recommend";
+        
+          // ... 중간 코드 생략 ...
+          
+          //------------------------------------------------------------------------------
+          // API 메서드
+          //------------------------------------------------------------------------------
+          Future<List<String>> uploadAndPredict(File imageFile) async {
+            try {
+              final uri = Uri.parse(fastApiPredictUrl);
+              final request = http.MultipartRequest('POST', uri)
+                ..files.add(await http.MultipartFile.fromPath(
+                  'image',
+                  imageFile.path,
+                  contentType: _getMediaType(imageFile),
+                ));
+        
+              print("📤 [UPLOAD] /predict");
+              print("📁 파일 경로: ${imageFile.path}");
+              print("📦 파일 크기: ${await imageFile.length()} bytes");
+        
+              final response = await request.send();
+              final body = await response.stream.bytesToString();
+        
+              if (response.statusCode != 200) {
+                throw HttpException("❌ /predict 실패: ${response.statusCode} - $body");
+              }
+        
+              final data = jsonDecode(body);
+              print("✅ FastAPI 응답 (/predict): $data");
+        
+              if (data is Map && data['ingredients'] != null) {
+                return List<String>.from(data['ingredients']);
+              } else if (data is List) {
+                return List<String>.from(data);
+              } else {
+                return [];
+              }
+            } catch (e) {
+              print("⚠️ FastAPI 연결 에러 (/predict): $e");
+              return [];
+            }
+          }
+        
+          Future<Map<String, dynamic>> uploadAndRecommend(
+              File imageFile, {
+                int topK = 5,
+              }) async {
+            try {
+              final uri = Uri.parse("$fastApiPredictAndRecommendUrl?top_k=$topK");
+              final request = http.MultipartRequest('POST', uri)
+                ..files.add(await http.MultipartFile.fromPath(
+                  'image',
+                  imageFile.path,
+                  contentType: _getMediaType(imageFile),
+                ));
+        
+              print("📤 [UPLOAD] /predict-and-recommend");
+              print("📁 파일 경로: ${imageFile.path}");
+              print("📦 파일 크기: ${await imageFile.length()} bytes");
+        
+              final response = await request.send();
+              final body = await response.stream.bytesToString();
+        
+              if (response.statusCode != 200) {
+                throw HttpException(
+                    "❌ /predict-and-recommend 실패: ${response.statusCode} - $body");
+              }
+        
+              final data = jsonDecode(body);
+              print("✅ FastAPI 응답 (/predict-and-recommend): $data");
+        
+              if (data is Map<String, dynamic>) return data;
+              if (data is Map) return Map<String, dynamic>.from(data);
+              return {};
+            } catch (e) {
+              print("⚠️ FastAPI 연결 에러 (/predict-and-recommend): $e");
+              return {};
+            }
+          }
+        }
+        ```
+        
+    - camera_screen.dart
+        
+        ```dart
+        import 'dart:io';
+        import 'dart:ui';
+        import 'package:flutter/material.dart';
+        import 'package:image_picker/image_picker.dart';
+        import '/services/image_service.dart';
+        
+        // 앞의 코드 생략 ...
+        
+          //------------------------------------------------------------------------------
+          // API 요청 메서드
+          //------------------------------------------------------------------------------
+          Future<void> _uploadToFastAPI() async {
+            if (_selectedImage == null) return;
+            setState(() => _isLoading = true);
+        
+            try {
+              final result = await _imageService.uploadAndPredict(_selectedImage!);
+              setState(() {
+                _ingredients = result;
+                _recommendations = [];
+              });
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("🧠 인식이 완료되었습니다.")),
+                );
+              }
+              await Future.delayed(const Duration(milliseconds: 400));
+              _scrollToEnd();
+            } catch (e) {
+              debugPrint("⚠️ 업로드/인식 오류: $e");
+              _showError("인식 중 오류가 발생했습니다.");
+            } finally {
+              if (mounted) setState(() => _isLoading = false);
+            }
+          }
+        
+          Future<void> _uploadAndRecommend() async {
+            if (_selectedImage == null) return;
+            setState(() => _isLoading = true);
+        
+            try {
+              final data = await _imageService.uploadAndRecommend(_selectedImage!, topK: 5);
+        
+              final ingredients = (data['ingredients'] is List) 
+                  ? List<String>.from(data['ingredients']) 
+                  : <String>[];
+        
+              final recsRaw = (data['recommendations'] is List)
+                  ? List<Map<String, dynamic>>.from(
+                      (data['recommendations'] as List).map((e) => Map<String, dynamic>.from(e)))
+                  : <Map<String, dynamic>>[];
+        
+              setState(() {
+                _ingredients = ingredients;
+                _recommendations = recsRaw;
+              });
+        
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("🍳 인식 및 추천이 완료되었습니다!")),
+                );
+              }
+        
+              await Future.delayed(const Duration(milliseconds: 400));
+              _scrollToEnd();
+            } catch (e) {
+              debugPrint("⚠️ 업로드/추천 오류: $e");
+              _showError("추천 중 오류가 발생했습니다.");
+            } finally {
+              if (mounted) setState(() => _isLoading = false);
+            }
+          }
+        ```
