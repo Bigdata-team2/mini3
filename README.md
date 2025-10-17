@@ -1,58 +1,190 @@
-# 🍳 재료 감지 API 설명서
+🍳 재료 감지 API 설명서
 
-> **사진 속 음식 재료를 자동으로 인식**하는 AI 기반 API입니다.
->   
-> YOLOv7 모델을 활용하여 업로드된 이미지에서 재료의 종류와 위치를 감지합니다.
+사진 속 음식 재료를 자동 인식하는 AI API입니다.
+업로드된 이미지를 YOLOv7로 분석해 재료의 종류, 위치(박스), 신뢰도를 반환합니다.
 
-## 📱 서비스 개요
+📱 서비스 개요
 
-이 API는 이미지 속 음식 재료를 자동으로 인식하는 서비스입니다. 사용자가 전송한 사진을 AI가 분석하여 포함된 재료들을 식별합니다. Flutter 앱과 연동하여 **레시피 추천** 및 **알러지 필터링** 등 다양한 기능으로 확장이 가능합니다.
+사용자가 보내는 음식 사진을 분석하여 포함된 재료명 리스트와 탐지 박스 좌표를 제공합니다. Flutter 앱과 연동해 레시피 추천, 알러지 필터링 등으로 확장 가능합니다.
 
-## 🛠 기술 스택
+🛠 기술 스택
+⚡ FastAPI
 
-### ⚡ FastAPI
-- Python 기반의 현대적이고 고성능 웹 프레임워크
-- Swagger UI를 통한 자동 API 문서화 지원
-- 비동기 처리로 빠른 응답 속도 보장
+Python 기반 고성능 웹 프레임워크
 
-### 🤖 YOLOv7
-- 실시간 객체 탐지가 가능한 최신 AI 모델
-- 단일 추론으로 다중 재료 동시 감지
-- 재료별 위치(Bounding Box), 종류(Class), 신뢰도(Confidence) 정보 제공
+자동 문서(Swagger/Redoc) 지원
 
-### 🔐 CORS 지원
-- Flutter 앱과 API 서버 간 안전한 통신 보장
-- 크로스 도메인 요청에 대한 보안 설정 제공
+비동기 처리로 빠른 응답
 
-### 🧹 NMS 처리
-- 중복 감지된 재료 박스를 자동으로 필터링
-- 가장 높은 신뢰도를 가진 결과만 선별
+🤖 YOLOv7
 
-## 📸 처리 프로세스
+실시간 객체 탐지 모델
 
-1. 이미지 업로드 수신
-2. 640x640 크기로 리사이즈 (원본 비율 유지)
-3. YOLOv7 모델을 통한 재료 감지
-4. NMS를 통한 중복 제거
-5. JSON 형식으로 결과 반환
+다중 객체(재료) 동시 탐지
 
-## 🔄 API 목록
-### POST /predict
-- 목적: 사진에서 재료 찾기
-- 입력: 이미지 파일
-- 출력: 재료 목록 + 위치
+Bounding Box / Class / Confidence 제공
 
-### GET /health
-- 목적: 서버 상태 확인
-- 입력: 없음
-- 출력: 상태 정보
+🔐 CORS
+
+Flutter ↔ API 교차 출처 요청 허용
+
+개발 단계: allow_origins=["*"] (배포 시 화이트리스트 권장)
+
+🧹 NMS (Non-Max Suppression)
+
+중복 박스 자동 제거
+
+가장 신뢰도 높은 박스만 남김
+
+📸 처리 프로세스
+
+이미지 업로드 수신 (multipart/form-data)
+
+리사이즈 640×640(원본 비율 유지, Letterbox)
+
+YOLOv7 추론 (GPU/CPU 자동 선택, FP16 지원)
+
+NMS 후처리 + 원본 좌표로 복원
+
+JSON 결과 반환 (재료 목록, 박스, 신뢰도)
+
+🧭 모델/환경 설정(요약)
+
+기본 입력 크기: 640
+
+신뢰도 임계값: 0.25
+
+IoU 임계값: 0.45
+
+FP16: GPU 사용 시 자동 활성화
+
+클래스 매핑(영→한, 일부 예):
+
+{
+  "cab": "배추", "cab2": "양배추", "car": "당근",
+  "cuc": "오이", "egg": "달걀", "gar": "마늘",
+  "lee": "대파", "oni": "양파", "pork": "돼지고기",
+  "pota": "감자", "rad": "무"
+}
+
+🔄 API 목록
+1) POST /predict — 사진에서 재료 찾기
+
+요청
+
+Content-Type: multipart/form-data
+
+Body:
+
+image: (필수) 이미지 파일(JPEG/PNG)
+
+img_size: (선택) 입력 크기, 기본 640
+
+conf_threshold: (선택) 신뢰도 임계값, 기본 0.25
+
+응답(200 OK)
+
+{
+  "ingredients": ["양파","돼지고기","감자"],
+  "detections": [
+    {
+      "label": "양파",
+      "label_en": "oni",
+      "confidence": 0.962,
+      "box_xyxy": [50.0, 30.0, 200.0, 180.0],
+      "class_id": 7
+    }
+  ],
+  "count": 3,
+  "classes": ["cab","cab2","car","cuc","egg","gar","lee","oni","pork","pota","rad"]
+}
 
 
-## 참고 자료
+예시(cURL)
+
+curl -X POST "http://<HOST>:8081/predict" \
+     -H "Accept: application/json" \
+     -F "image=@/path/sample.jpg" \
+     -F "img_size=640" \
+     -F "conf_threshold=0.25"
+
+2) POST /predict-and-recommend — 재료 감지 + 레시피 추천(스텁)
+
+설명: 감지 후 추천 로직(추후 구현)까지 한 번에 호출
+
+요청
+
+image: (필수) 이미지 파일
+
+top_k: (선택) 추천 개수, 기본 5
+
+응답(200 OK)
+
+{
+  "ingredients": ["양파","감자"],
+  "detections": [ /* predict와 동일 구조 */ ],
+  "count": 2,
+  "recommendations": [],   // TODO: 추후 구현
+  "classes": [ "... 클래스 목록 ..." ]
+}
+
+3) GET /health — 서버 상태 확인
+
+응답(200 OK)
+
+{
+  "status": "healthy",
+  "model_loaded": true,
+  "model_version": "YOLOv7",
+  "device": "cuda:0",
+  "class_count": 11,
+  "classes": ["cab","cab2","car","cuc","egg","gar","lee","oni","pork","pota","rad"]
+}
+
+🧯 오류 응답 형식
+
+잘못된 파일 타입
+
+{ "detail": "이미지 파일을 업로드하세요." }
+
+
+내부 처리 오류
+
+{ "detail": "추론 중 오류: <메시지>" }
+
+
+HTTP 상태코드: 400(요청 오류), 500(서버 오류)
+
+🔒 보안/네트워크
+
+CORS: 개발용 *, 배포 시 앱 도메인 화이트리스트로 제한 권장
+
+TLS/HTTPS 권장
+
+(선택) Authorization: Bearer <Firebase ID Token> 검증 로직 추가 가능
+
+⚙️ 성능 팁
+
+업로드 전 클라이언트에서 JPEG 압축(품질 0.8) 추천
+
+긴 변을 1280px 정도로 선압축하면 네트워크 지연 ↓
+
+GPU 사용 시 FP16 활성화로 지연 시간 ↓
+
+🧩 통합 가이드(Flutter)
+
+multipart/form-data로 이미지 전송
+
+예시 응답의 box_xyxy는 원본 좌표 기준 → 바로 캔버스 오버레이 가능
+
+반환된 ingredients로 레시피 API/파이어스토어 조회
+
+📚 참고 자료
+
 FastAPI 문서: https://fastapi.tiangolo.com/
 
 YOLOv7 GitHub: https://github.com/WongKinYiu/yolov7
 
-버전: 1.0 (2025.10.16)
-
-팀: Mini3 (문의 : sde0110@naver.com)
+버전: 1.0 (2025-10-16)
+팀: Mini3
+문의: sde0110@naver.com
